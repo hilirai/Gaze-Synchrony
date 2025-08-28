@@ -14,12 +14,18 @@ import threading
 import time
 
 # ====== CONFIG ======
-CHECKPOINT  = "/workspace/sam2/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
+CHECKPOINT  = "/home/administrator/sam2/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
 MODEL_CFG   = "/configs/sam2.1/sam2.1_hiera_b+.yaml"
-VIDEO_DIR   = os.environ.get("VIDEO_DIR", "/workspace/sam2/sam2/app/data/player_1/video_parts")
-OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", "/workspace/sam2/sam2/app/data/player_1/output")
+VIDEO_DIR   = os.environ.get("VIDEO_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/video_parts")
+OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/output")
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 GAZE_RADIUS = 50  # pixels
+
+# Configure PyTorch CUDA memory management
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
+    torch.cuda.empty_cache()
+    print(f"[info] GPU memory configured: {torch.cuda.get_device_name(0)} with {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
 # Shared with Flask: where it serves /static from (env overrides)
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +49,16 @@ def detect_gaze_point(frame):
     M = cv2.moments(c)
     if M["m00"] == 0:
         return None
-    return int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])
+    
+    # Calculate center coordinates
+    center_x = int(M["m10"]/M["m00"])
+    center_y = int(M["m01"]/M["m00"])
+    
+    # Calculate radius from contour area (assuming circular shape)
+    area = cv2.contourArea(c)
+    radius = int(np.sqrt(area / np.pi)) if area > 0 else GAZE_RADIUS
+    
+    return center_x, center_y, radius
 
 def draw_numbered_grid(image, spacing=50):
     h, w = image.shape[:2]
@@ -109,9 +124,9 @@ def process_gaze_group(item):
         g = detect_gaze_point(frame_buf)
         hit = False
         if g:
-            gx, gy = g
-            if (row.xmin - GAZE_RADIUS <= gx <= row.xmax + GAZE_RADIUS and
-                row.ymin - GAZE_RADIUS <= gy <= row.ymax + GAZE_RADIUS):
+            gx, gy, gaze_radius = g
+            if (row.xmin - gaze_radius <= gx <= row.xmax + gaze_radius and
+                row.ymin - gaze_radius <= gy <= row.ymax + gaze_radius):
                 hit = True
 
         results.append({'frame': int(row.global_frame),
@@ -130,7 +145,7 @@ def main():
     parts = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
     if not parts:
         raise RuntimeError(f"No video_part_*.mp4 in {VIDEO_DIR}")
-    parts = parts[:2]
+    parts = parts[:1]
     offsets, cum = [], 0
     for p in parts:
         cap = cv2.VideoCapture(p)
@@ -185,7 +200,7 @@ def main():
     # Start Flask server in background
     def start_flask_server():
         app_path = os.path.join(os.path.dirname(__file__), "../app.py")
-        subprocess.run(["/workspace/sam2/sam2/.venv/bin/python", app_path], 
+        subprocess.run(["python", app_path], 
                       env=dict(os.environ, SCRIBBLE_STATIC_DIR=SCRIBBLE_STATIC_DIR))
     
     print("[info] Starting web interface server...")
@@ -241,8 +256,18 @@ def main():
             continue
         xs, ys = zip(*stroke)
         seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
+    
+    # Turn negative strokes into negative seed points (centroids)
+    neg_seeds = []
+    for stroke in strokes.get("neg", []):
+        if not stroke:
+            continue
+        xs, ys = zip(*stroke)
+        neg_seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
+    
     n_objs = len(seeds)
-    print(f"Loaded {n_objs} seed points from scribbles.")
+    n_neg = len(neg_seeds)
+    print(f"Loaded {n_objs} positive seed points and {n_neg} negative seed points from scribbles.")
 
     predictor = build_sam2_video_predictor(MODEL_CFG, CHECKPOINT)
     track_records = []
@@ -255,12 +280,25 @@ def main():
         with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=torch.float16):
             state = predictor.init_state(part)
             for oid, (sx, sy) in enumerate(seeds):
+                # Add positive seed point
+                pos_points = [[sx, sy]]
+                pos_labels = [1]
+                
+                # Add negative seed points if they exist
+                neg_points = [[nx, ny] for nx, ny in neg_seeds]
+                neg_labels = [0] * len(neg_seeds)
+                
+                # Combine positive and negative points
+                all_points = pos_points + neg_points
+                all_labels = pos_labels + neg_labels
+                
                 predictor.add_new_points_or_box(
                     state, frame_idx=selected_frame,
-                    points=[[sx, sy]], labels=[1], obj_id=oid
+                    points=all_points, labels=all_labels, obj_id=oid
                 )
             last_masks = {}
 
+            frame_counter = 0
             for lf, object_ids, masks in tqdm(
                 predictor.propagate_in_video(state),
                 desc=f"Part {idx} propagation",
@@ -270,6 +308,11 @@ def main():
                 ret, frame = cap.read()
                 if not ret:
                     continue
+
+                # Periodic memory cleanup every 50 frames
+                frame_counter += 1
+                if frame_counter % 50 == 0:
+                    torch.cuda.empty_cache()
 
                 for oid, mask in zip(object_ids, masks):
                     m = mask.squeeze().cpu().numpy()
@@ -292,6 +335,13 @@ def main():
                     last_masks[oid] = mask
 
         cap.release()
+
+        # Clear GPU memory after each part
+        torch.cuda.empty_cache()
+        del state
+        import gc
+        gc.collect()
+        print(f"[info] Cleared GPU memory after part {idx}")
 
         # reseed for next part
         if idx < len(parts) - 1:

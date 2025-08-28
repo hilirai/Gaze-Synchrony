@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import numpy as np
+import os
 
 def analyze_gaze_sync(player1_file, player2_file):
     """
@@ -11,13 +12,17 @@ def analyze_gaze_sync(player1_file, player2_file):
     Args:
         player1_file: CSV file for player 1 gaze data
         player2_file: CSV file for player 2 gaze data
+        
+    Returns:
+        sync_results: List of synchronization data per frame
+        obj_cols: List of object column names
+        sync_df: DataFrame with sync analysis for saving
     """
     # Load the data
     p1_data = pd.read_csv(player1_file)
     p2_data = pd.read_csv(player2_file)
     
     # Check for and apply frame offsets
-    import os
     p1_offset = 0
     p2_offset = 0
     
@@ -57,30 +62,61 @@ def analyze_gaze_sync(player1_file, player2_file):
     # Calculate synchronization for each frame
     sync_results = []
     
-    for frame in p1_data['frame']:
-        p1_row = p1_data[p1_data['frame'] == frame].iloc[0]
-        p2_row = p2_data[p2_data['frame'] == frame].iloc[0]
+    # Get common frames between both players
+    common_frames = set(p1_data['frame']) & set(p2_data['frame'])
+    common_frames = sorted(list(common_frames))
+    
+    print(f"[info] Found {len(common_frames)} common frames between players")
+    
+    for frame in common_frames:
+        p1_rows = p1_data[p1_data['frame'] == frame]
+        p2_rows = p2_data[p2_data['frame'] == frame]
+        
+        # Skip if frame doesn't exist in either dataset
+        if p1_rows.empty or p2_rows.empty:
+            continue
+            
+        p1_row = p1_rows.iloc[0]
+        p2_row = p2_rows.iloc[0]
         
         # Check if both players are looking at the same objects
         same_objects = []
         object_sync_status = {}
         
         for obj_col in obj_cols:
-            is_synced = p1_row[obj_col] == 1 and p2_row[obj_col] == 1
-            object_sync_status[obj_col] = is_synced
-            if is_synced:
-                same_objects.append(obj_col)
+            if obj_col in p1_row and obj_col in p2_row:
+                is_synced = p1_row[obj_col] == 1 and p2_row[obj_col] == 1
+                object_sync_status[obj_col] = is_synced
+                if is_synced:
+                    same_objects.append(obj_col)
         
         sync_results.append({
             'frame': frame,
             'synchronized_objects': same_objects,
             'sync_count': len(same_objects),
             'object_sync_status': object_sync_status,
-            'p1_looking_at': [obj for obj in obj_cols if p1_row[obj] == 1],
-            'p2_looking_at': [obj for obj in obj_cols if p2_row[obj] == 1]
+            'p1_looking_at': [obj for obj in obj_cols if obj in p1_row and p1_row[obj] == 1],
+            'p2_looking_at': [obj for obj in obj_cols if obj in p2_row and p2_row[obj] == 1]
         })
     
-    return sync_results, obj_cols
+    # Create DataFrame for CSV export
+    sync_df_data = []
+    for result in sync_results:
+        row_data = {
+            'frame': result['frame'],
+            'sync_count': result['sync_count'],
+            'synchronized_objects': ','.join(result['synchronized_objects']),
+            'p1_looking_at': ','.join(result['p1_looking_at']),
+            'p2_looking_at': ','.join(result['p2_looking_at'])
+        }
+        # Add individual object sync status
+        for obj_col in obj_cols:
+            row_data[f'{obj_col}_sync'] = result['object_sync_status'][obj_col]
+        sync_df_data.append(row_data)
+    
+    sync_df = pd.DataFrame(sync_df_data)
+    
+    return sync_results, obj_cols, sync_df
 
 def plot_synchronization(sync_results, obj_cols):
     """Create separate graphs for overall sync and individual object synchronization."""
@@ -238,7 +274,13 @@ if __name__ == "__main__":
     print(f"Player 2 data: {player2_file}")
     
     try:
-        sync_results, obj_cols = analyze_gaze_sync(player1_file, player2_file)
+        sync_results, obj_cols, sync_df = analyze_gaze_sync(player1_file, player2_file)
+        
+        # Save sync analysis as CSV
+        sync_csv_path = os.path.join(os.path.dirname(player1_file), "sync_analysis.csv")
+        sync_df.to_csv(sync_csv_path, index=False)
+        print(f"[OK] Saved synchronization analysis to: {sync_csv_path}")
+        
         print_detailed_results(sync_results)
         plot_synchronization(sync_results, obj_cols)
         print("Analysis completed successfully!")

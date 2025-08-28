@@ -17,9 +17,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Directories (set by start_analysis.sh)
-INPUT_DIR="${INPUT_DIR:-/tmp/input}"       # Videos folder path
-OUTPUT_DIR="${OUTPUT_DIR:-/tmp/output}"    # Results folder path  
-WORK_DIR="${WORK_DIR:-/tmp/gaze_workspace}" # Temporary processing
+INPUT_DIR="${INPUT_DIR:-./input}"       # Videos folder path
+OUTPUT_DIR="${OUTPUT_DIR:-./output}"    # Results folder path  
+WORK_DIR="${WORK_DIR:-./workspace}" # Temporary processing
 
 print_banner() {
     echo -e "${BLUE}"
@@ -72,13 +72,14 @@ check_prerequisites() {
     fi
     
     # Check if required scripts exist
-    if [ ! -f "/workspace/sam2/sam2/app/scripts/analyze_player_gaze.py" ]; then
-        log_error "Gaze tracking script not found. Looking for /workspace/sam2/sam2/app/scripts/analyze_player_gaze.py"
+    SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+    if [ ! -f "$SCRIPT_DIR/analyze_player_gaze.py" ]; then
+        log_error "Gaze tracking script not found. Looking for $SCRIPT_DIR/analyze_player_gaze.py"
         exit 1
     fi
     
-    if [ ! -f "/workspace/sam2/sam2/app/scripts/sync_players_data.py" ]; then
-        log_error "Sync script not found. Looking for /workspace/sam2/sam2/app/scripts/sync_players_data.py"
+    if [ ! -f "$SCRIPT_DIR/sync_players_data.py" ]; then
+        log_error "Sync script not found. Looking for $SCRIPT_DIR/sync_players_data.py"
         exit 1
     fi
     
@@ -95,10 +96,9 @@ setup_workspace() {
     mkdir -p "$WORK_DIR/player1/output"
     mkdir -p "$WORK_DIR/player2/output"
     
-    # Create final output directories
-    mkdir -p "$OUTPUT_DIR/player1_results"
-    mkdir -p "$OUTPUT_DIR/player2_results"
+    # Create final output directories  
     mkdir -p "$OUTPUT_DIR/sync_results"
+    mkdir -p "$OUTPUT_DIR/pair_01"  # For multi-condition analysis
     
     log_success "Workspace ready"
 }
@@ -110,11 +110,11 @@ split_video() {
     
     log_step "Splitting Player $player video into parts..."
     
-    # Split video into 30-second segments (adjust as needed)
+    # Split video into 15-second segments (adjust as needed)
     ffmpeg -i "$INPUT_DIR/$video_file" \
            -c copy \
            -f segment \
-           -segment_time 30 \
+           -segment_time 15 \
            -reset_timestamps 1 \
            "$output_dir/video_part_%03d.mp4" \
            -y -loglevel error
@@ -134,7 +134,8 @@ run_gaze_tracking() {
     # Set up paths for the tracking script
     export VIDEO_DIR="$WORK_DIR/player${player}/video_parts"
     export OUTPUT_DIR="$WORK_DIR/player${player}/output"
-    export SCRIBBLE_STATIC_DIR="/workspace/sam2/sam2/app/static"
+    SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+    export SCRIBBLE_STATIC_DIR="$SCRIPT_DIR/../static"
     
     echo -e "${YELLOW}"
     echo "=========================================="
@@ -153,13 +154,13 @@ run_gaze_tracking() {
     
     # Start the tracking script
     log_info "Running gaze analysis script..."
-    cd /workspace/sam2/sam2/app/scripts
-    /workspace/sam2/sam2/.venv/bin/python analyze_player_gaze.py
+    cd "$SCRIPT_DIR"
+    python analyze_player_gaze.py
     
-    # Copy results to output
+    # Check that gaze tracking completed successfully
     if [ -d "$WORK_DIR/player${player}/output/gaze_data" ]; then
-        cp -r "$WORK_DIR/player${player}/output/gaze_data" "$OUTPUT_DIR/player${player}_results/"
         log_success "Player $player gaze tracking completed"
+        log_info "Individual player data kept in workspace for sync analysis"
     else
         log_error "Player $player gaze tracking failed - no output data found"
         exit 1
@@ -171,12 +172,17 @@ run_synchronization_analysis() {
     log_step "Running synchronization analysis for $analysis_type..."
     
     # Look for the CSV files from both players (gaze_hits_per_frame.csv specifically)
-    P1_CSV=$(find "$OUTPUT_DIR/player1_results" -name "gaze_hits_per_frame.csv" -type f | head -1)
-    P2_CSV=$(find "$OUTPUT_DIR/player2_results" -name "gaze_hits_per_frame.csv" -type f | head -1)
+    # The files are in the workspace output directories, not the final output directories yet
+    P1_CSV=$(find "$WORK_DIR/player1/output" -name "gaze_hits_per_frame.csv" -type f | head -1)
+    P2_CSV=$(find "$WORK_DIR/player2/output" -name "gaze_hits_per_frame.csv" -type f | head -1)
     
     if [ -z "$P1_CSV" ] || [ -z "$P2_CSV" ]; then
         log_error "Could not find CSV files for both players"
-        log_info "Looking in: $OUTPUT_DIR/player1_results and $OUTPUT_DIR/player2_results"
+        log_info "Looking in: $WORK_DIR/player1/output and $WORK_DIR/player2/output"
+        log_info "Available files in player1 output:"
+        find "$WORK_DIR/player1/output" -type f 2>/dev/null | head -10
+        log_info "Available files in player2 output:"
+        find "$WORK_DIR/player2/output" -type f 2>/dev/null | head -10
         exit 1
     fi
     
@@ -190,7 +196,8 @@ run_synchronization_analysis() {
     # Run synchronization analysis
     cd "$WORK_DIR"
     log_info "Running synchronization analysis..."
-    /workspace/sam2/sam2/.venv/bin/python /workspace/sam2/sam2/app/scripts/sync_players_data.py player1_gaze.csv player2_gaze.csv
+    SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+    python "$SCRIPT_DIR/sync_players_data.py" player1_gaze.csv player2_gaze.csv
     
     # Move results to output directory
     if [ -d "sync_results" ]; then
@@ -199,6 +206,12 @@ run_synchronization_analysis() {
     else
         log_error "Synchronization analysis failed - no results generated"
         exit 1
+    fi
+    
+    # Copy sync_analysis.csv for multi-condition analysis
+    if [ -f "sync_analysis.csv" ]; then
+        cp "sync_analysis.csv" "$OUTPUT_DIR/pair_01/sync_analysis.csv"
+        log_info "Saved sync_analysis.csv for multi-condition analysis"
     fi
 }
 
