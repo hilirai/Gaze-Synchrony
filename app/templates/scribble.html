@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Scribble Prompt</title>
+  <style>
+    canvas { border:1px solid #000; cursor: crosshair; }
+    body { font-family: sans-serif; text-align: center; }
+    #controls { margin: 10px; }
+    #err { color: #b00; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h3>Draw Positive (green) or Negative (red) Scribbles</h3>
+  <p>Left-click+drag: positive • Right-click+drag: negative • Click <strong>Send</strong> when done.</p>
+
+  <div id="err"></div>
+
+  <!-- Frame selection controls -->
+  <div id="frame-controls" style="margin: 10px;">
+    <button onclick="prevFrame()" id="prevBtn">← Previous Frame</button>
+    <span id="frame-info" style="margin: 0 20px; font-weight: bold;">Frame 1 of 10</span>
+    <button onclick="nextFrame()" id="nextBtn">Next Frame →</button>
+    <p style="font-size: 0.9em; color: #666;">Choose the clearest frame to start analysis</p>
+  </div>
+
+  <!-- Canvas for drawing; background seeded with the grid image -->
+  <canvas id="cv"></canvas>
+
+  <div id="controls">
+    <button onclick="sendStrokes()">Send</button>
+    <button onclick="reloadImg()">Reload image</button>
+    <span id="status"></span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("cv");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const errEl = document.getElementById("err");
+
+    // Keep strokes in outer scope so buttons can access them
+    let drawing = false, mode = "pos";
+    const strokes = { pos: [], neg: [] };
+    let current = null;
+    
+    // Frame navigation state
+    let currentFrame = 0;
+    const totalFrames = 10;
+    const frameInfoEl = document.getElementById("frame-info");
+    const prevBtn = document.getElementById("prevBtn");
+    const nextBtn = document.getElementById("nextBtn");
+
+    function updateFrameInfo() {
+      frameInfoEl.textContent = `Frame ${currentFrame + 1} of ${totalFrames}`;
+      prevBtn.disabled = (currentFrame === 0);
+      nextBtn.disabled = (currentFrame === totalFrames - 1);
+    }
+
+    function drawBackground() {
+      const img = new Image();
+      // Use current frame for image source
+      const imageName = `seed_grid_frame_${currentFrame}.jpg`;
+      img.src = `/static/${imageName}?v=` + Date.now();
+      img.onload = () => {
+        errEl.textContent = "";
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        // Clear strokes when changing frames
+        strokes.pos = [];
+        strokes.neg = [];
+      };
+      img.onerror = () => {
+        errEl.textContent = `Could not load /static/${imageName}. Make sure the frame images were generated.`;
+      };
+    }
+
+    function prevFrame() {
+      if (currentFrame > 0) {
+        currentFrame--;
+        updateFrameInfo();
+        drawBackground();
+      }
+    }
+
+    function nextFrame() {
+      if (currentFrame < totalFrames - 1) {
+        currentFrame++;
+        updateFrameInfo();
+        drawBackground();
+      }
+    }
+
+    function setupDrawing() {
+      canvas.onmousedown = e => {
+        e.preventDefault();
+        drawing = true;
+        mode = (e.button === 2) ? "neg" : "pos";
+        current = [];
+        strokes[mode].push(current);
+      };
+      canvas.onmousemove = e => {
+        if (!drawing) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        current.push([x, y]);
+        ctx.fillStyle = (mode === "pos") ? "green" : "red";
+        ctx.fillRect(x, y, 2, 2);
+      };
+      canvas.onmouseup = () => { drawing = false; };
+      canvas.onmouseleave = () => { drawing = false; };
+      canvas.oncontextmenu = e => e.preventDefault();
+    }
+
+    function sendStrokes() {
+      const data = {
+        strokes: strokes,
+        selectedFrame: currentFrame
+      };
+      fetch("/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
+      })
+      .then(r => r.json())
+      .then(() => { statusEl.textContent = `✔ sent (frame ${currentFrame + 1})`; })
+      .catch(() => { statusEl.textContent = "✖ send failed"; });
+    }
+
+    function reloadImg() {
+      statusEl.textContent = "";
+      drawBackground();
+    }
+
+    // Initialize
+    updateFrameInfo();
+    drawBackground();
+    setupDrawing();
+    
+    // Make functions globally available
+    window.sendStrokes = sendStrokes;
+    window.reloadImg = reloadImg;
+    window.prevFrame = prevFrame;
+    window.nextFrame = nextFrame;
+  </script>
+</body>
+</html>
