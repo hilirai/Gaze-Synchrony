@@ -43,7 +43,12 @@ fi
 # Get current directory (where videos/ and results/ should be)
 PROJECT_DIR="$(pwd)"
 VIDEOS_DIR="$PROJECT_DIR/videos"
-RESULTS_DIR="$PROJECT_DIR/results/$ANALYSIS_TYPE"
+# Check if this is a solo run (both videos contain "solo")
+if [[ "$1" == *"solo"* && "$2" == *"solo"* ]]; then
+    RESULTS_DIR="$PROJECT_DIR/results/solo_$ANALYSIS_TYPE"
+else
+    RESULTS_DIR="$PROJECT_DIR/results/$ANALYSIS_TYPE"
+fi
 
 # Check if directories exist
 if [ ! -d "$VIDEOS_DIR" ]; then

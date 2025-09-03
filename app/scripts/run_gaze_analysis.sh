@@ -201,7 +201,12 @@ run_synchronization_analysis() {
     
     # Move results to output directory
     if [ -d "sync_results" ]; then
-        cp -r sync_results/* "$OUTPUT_DIR/sync_results/"
+        # Ensure sync_results directory exists in output
+        mkdir -p "$OUTPUT_DIR/sync_results"
+        # Copy contents if sync_results is not empty
+        if [ "$(ls -A sync_results)" ]; then
+            cp -r sync_results/* "$OUTPUT_DIR/sync_results/"
+        fi
         log_success "Synchronization analysis completed"
     else
         log_error "Synchronization analysis failed - no results generated"

@@ -145,7 +145,6 @@ def main():
     parts = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
     if not parts:
         raise RuntimeError(f"No video_part_*.mp4 in {VIDEO_DIR}")
-    parts = parts[:1]
     offsets, cum = [], 0
     for p in parts:
         cap = cv2.VideoCapture(p)
@@ -162,7 +161,7 @@ def main():
     
     print(f"[info] Extracting first 10 frames for selection...")
     
-    for frame_idx in range(10):
+    for frame_idx in range(50):
         ret, frame = cap.read()
         if not ret:
             print(f"[warning] Could only extract {frames_extracted} frames from video")

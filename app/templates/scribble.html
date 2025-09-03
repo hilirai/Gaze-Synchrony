@@ -19,7 +19,7 @@
   <!-- Frame selection controls -->
   <div id="frame-controls" style="margin: 10px;">
     <button onclick="prevFrame()" id="prevBtn">← Previous Frame</button>
-    <span id="frame-info" style="margin: 0 20px; font-weight: bold;">Frame 1 of 10</span>
+    <span id="frame-info" style="margin: 0 20px; font-weight: bold;">Frame 1 of 50</span>
     <button onclick="nextFrame()" id="nextBtn">Next Frame →</button>
     <p style="font-size: 0.9em; color: #666;">Choose the clearest frame to start analysis</p>
   </div>
@@ -46,7 +46,7 @@
     
     // Frame navigation state
     let currentFrame = 0;
-    const totalFrames = 10;
+    let totalFrames = 50; // Will be updated dynamically
     const frameInfoEl = document.getElementById("frame-info");
     const prevBtn = document.getElementById("prevBtn");
     const nextBtn = document.getElementById("nextBtn");
