@@ -12,6 +12,8 @@ import webbrowser
 import subprocess
 import threading
 import time
+import shutil
+import gc
 
 # ====== CONFIG ======
 CHECKPOINT  = "/home/administrator/sam2/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
@@ -21,11 +23,16 @@ OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", "/sam2/Gaze-Synchrony/app/data/player
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 GAZE_RADIUS = 100  # pixels
 MAX_SAVE_OVERLAY = 100
+
 # Configure PyTorch CUDA memory management
 if torch.cuda.is_available():
-    torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
+    try:
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory (adjust if needed)
+    except Exception:
+        pass
     torch.cuda.empty_cache()
-    print(f"[info] GPU memory configured: {torch.cuda.get_device_name(0)} with {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"[info] GPU memory configured: {torch.cuda.get_device_name(0)} "
+          f"with {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
 # Shared with Flask: where it serves /static from (env overrides)
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -49,15 +56,14 @@ def detect_gaze_point(frame):
     M = cv2.moments(c)
     if M["m00"] == 0:
         return None
-    
-    # Calculate center coordinates
+
     center_x = int(M["m10"]/M["m00"])
     center_y = int(M["m01"]/M["m00"])
-    
-    # Calculate radius from contour area (assuming circular shape)
+
     area = cv2.contourArea(c)
     radius = int(np.sqrt(area / np.pi)) if area > 0 else GAZE_RADIUS
-    
+    # ensure a minimum tolerance
+    radius = max(GAZE_RADIUS, radius)
     return center_x, center_y, radius
 
 def draw_numbered_grid(image, spacing=50):
@@ -72,7 +78,7 @@ def draw_numbered_grid(image, spacing=50):
 
 def overlay_mask(image, mask):
     overlay = image.copy()
-    m = mask.squeeze().cpu().numpy()
+    m = mask.squeeze().detach().cpu().numpy()
     bin_mask = (m > 0.5).astype(np.uint8)*255
     contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(overlay, contours, -1, (0,255,0), 2)
@@ -142,10 +148,15 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(OUTPUT_DIR, "overlays"), exist_ok=True)
     print("video dir", VIDEO_DIR)
+
     parts = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
-    parts = parts[:2]
+    # TEMP: limit for testing; remove the next line to process all parts
+    # parts = parts[:2]
+
     if not parts:
         raise RuntimeError(f"No video_part_*.mp4 in {VIDEO_DIR}")
+
+    # compute offsets (global frame index = offsets[idx] + local_frame)
     offsets, cum = [], 0
     for p in parts:
         cap = cv2.VideoCapture(p)
@@ -154,71 +165,63 @@ def main():
         offsets.append(cum)
         cum += cnt
 
-    # 2) seeding grid
-    # Extract first 10 frames for selection
+    # 2) seeding grid (extract first up to 50 frames from part 0)
     cap = cv2.VideoCapture(parts[0])
     frames_extracted = 0
     frame_files = []
-    
-    print(f"[info] Extracting first 10 frames for selection...")
-    
+
+    print(f"[info] Extracting first 50 frames for selection...")
+
     for frame_idx in range(50):
         ret, frame = cap.read()
         if not ret:
             print(f"[warning] Could only extract {frames_extracted} frames from video")
             break
-            
-        # Add numbered grid to frame
+
         draw_numbered_grid(frame)
-        
-        # Save to both OUTPUT_DIR and Flask static folder
+
         grid_filename = f"seed_grid_frame_{frame_idx}.jpg"
         grid_path = os.path.join(OUTPUT_DIR, grid_filename)
         cv2.imwrite(grid_path, frame)
-        
+
         static_grid = os.path.join(SCRIBBLE_STATIC_DIR, grid_filename)
         cv2.imwrite(static_grid, frame)
-        
+
         frame_files.append(grid_filename)
         frames_extracted += 1
-        
+
     cap.release()
-    
-    # Also save the first frame as the default seed_grid.jpg for backwards compatibility
+
     if frames_extracted > 0:
         default_grid_path = os.path.join(OUTPUT_DIR, "seed_grid.jpg")
         default_static_grid = os.path.join(SCRIBBLE_STATIC_DIR, "seed_grid.jpg")
-        
-        # Copy first frame as default
-        import shutil
         shutil.copy(os.path.join(OUTPUT_DIR, "seed_grid_frame_0.jpg"), default_grid_path)
         shutil.copy(os.path.join(SCRIBBLE_STATIC_DIR, "seed_grid_frame_0.jpg"), default_static_grid)
-    
+
     print(f"[info] Extracted {frames_extracted} frames: {frame_files}")
     print(f"[info] Default grid saved as seed_grid.jpg")
 
     # Start Flask server in background
     def start_flask_server():
         app_path = os.path.join(os.path.dirname(__file__), "../app.py")
-        subprocess.run(["python", app_path], 
-                      env=dict(os.environ, SCRIBBLE_STATIC_DIR=SCRIBBLE_STATIC_DIR))
-    
+        subprocess.run(["python", app_path],
+                       env=dict(os.environ, SCRIBBLE_STATIC_DIR=SCRIBBLE_STATIC_DIR))
+
     print("[info] Starting web interface server...")
     flask_thread = threading.Thread(target=start_flask_server, daemon=True)
     flask_thread.start()
-    
-    # Wait for server to start
+
+    # Wait for server to start (up to 10s)
     print("[info] Waiting for server to start...")
-    for _ in range(10):  # Wait up to 10 seconds
+    for _ in range(10):
         try:
             resp = requests.get("http://localhost:5000", timeout=1)
             if resp.status_code == 200:
                 break
-        except:
+        except Exception:
             pass
         time.sleep(1)
-    
-    # NEW scribble-based seeding:
+
     print("\n📸 Open http://localhost:5000 — draw green (pos) and optional red (neg), then click Send.")
     print("🖼️  Use Previous/Next buttons to select the clearest frame!")
     try:
@@ -231,57 +234,35 @@ def main():
     resp = requests.get("http://localhost:5000/get", timeout=10)
     resp.raise_for_status()
     response = resp.json()
-    
+
     # Handle both old and new format
     if "strokes" in response:
         strokes = response["strokes"]
         selected_frame = response.get("selectedFrame", 0)
     else:
-        # Legacy format
         strokes = response
         selected_frame = 0
-    
+
     print(f"[info] User selected frame {selected_frame} for analysis")
-    
-    # Save the selected frame offset to file
+
+    # Save the selected frame (metadata only)
     frame_offset_file = os.path.join(OUTPUT_DIR, "selected_frame_offset.txt")
     with open(frame_offset_file, 'w') as f:
         f.write(str(selected_frame))
     print(f"[info] Saved frame offset {selected_frame} to {frame_offset_file}")
 
-    # # Turn positive strokes into seed points (centroids)
-    # seeds = []
-    # for stroke in strokes.get("pos", []):
-    #     if not stroke:
-    #         continue
-    #     xs, ys = zip(*stroke)
-    #     seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
-    
-    # # Turn negative strokes into negative seed points (centroids)
-    # neg_seeds = []
-    # for stroke in strokes.get("neg", []):
-    #     if not stroke:
-    #         continue
-    #     xs, ys = zip(*stroke)
-    #     neg_seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
-    
-    # n_objs = len(seeds)
-    # n_neg = len(neg_seeds)
-    # print(f"Loaded {n_objs} positive seed points and {n_neg} negative seed points from scribbles.")
+    # --- Multi-point sampling along strokes (SAM-friendly) ---
+    POS_SAMPLING_STEP = int(os.environ.get("POS_SAMPLING_STEP", "8"))
+    POS_SAMPLING_CAP  = int(os.environ.get("POS_SAMPLING_CAP",  "12"))
+    NEG_SAMPLING_STEP = int(os.environ.get("NEG_SAMPLING_STEP", "8"))
+    NEG_SAMPLING_CAP  = int(os.environ.get("NEG_SAMPLING_CAP",  "5"))
+    SAMPLING_STRATEGY = "uniform"
 
-    # --- Multi-point sampling along strokes (more robust than a single centroid) ---
-    # Configurable sampling (env vars), with sensible defaults
-    POS_SAMPLING_STEP = int(os.environ.get("POS_SAMPLING_STEP", "8"))    # take every Nth vertex of a positive stroke
-    POS_SAMPLING_CAP  = int(os.environ.get("POS_SAMPLING_CAP",  "12"))   # limit max positive points per stroke
-    NEG_SAMPLING_STEP = int(os.environ.get("NEG_SAMPLING_STEP", "8"))    # take every Nth vertex of a negative stroke
-    NEG_SAMPLING_CAP  = int(os.environ.get("NEG_SAMPLING_CAP",  "2"))   # limit max negative points total
-    SAMPLING_STRATEGY = "uniform" 
     def _sample_points(stroke, step, cap):
         """
         Return up to `cap` points from `stroke` according to SAMPLING_STRATEGY.
         - "stride": take every `step`-th vertex, then first `cap`.
-        - "uniform": sample *interior* points by arc-length (exclude endpoints),
-                    enforce min spacing, and cap to a small count (3–5 is ideal).
+        - "uniform": sample interior arc-length points, min spacing, small hard cap (<=5).
         """
         if not stroke:
             return []
@@ -305,11 +286,8 @@ def main():
         if total == 0.0:
             return [[int(xs[0]), int(ys[0])]]
 
-        # Prefer a *small* number of interior positives
-        # (SAM2 usually works best with ~3–5)
         hard_cap = int(min(cap, 5))
         if hard_cap <= 1:
-            # pick a robust "middle" point
             mid_t = total * 0.5
             j = int(np.searchsorted(cum, mid_t, side="right"))
             j = max(1, min(j, cum.size - 1))
@@ -319,18 +297,15 @@ def main():
             yi = ys[j-1] + alpha * (ys[j] - ys[j-1])
             return [[int(round(xi)), int(round(yi))]]
 
-        # Exclude endpoints (avoid borders) and bias toward the interior band
-        # e.g., 10%..90% of the arc length
         interior_lo, interior_hi = 0.10, 0.90
         targets = np.linspace(total * interior_lo, total * interior_hi, num=hard_cap)
 
         pts = []
         last_accepted = None
-        min_sep = 6.0  # px; increase to 8–10 if you still see clumps
+        min_sep = 6.0
 
         j = 1
         for t in targets:
-            # find segment
             while j < cum.size and cum[j] < t:
                 j += 1
             j = min(j, cum.size - 1)
@@ -342,12 +317,10 @@ def main():
                 xi = xs[j-1] + alpha * (xs[j] - xs[j-1])
                 yi = ys[j-1] + alpha * (ys[j] - ys[j-1])
 
-            # spacing filter
             if last_accepted is None or np.hypot(xi - last_accepted[0], yi - last_accepted[1]) >= min_sep:
                 pts.append([xi, yi])
                 last_accepted = (xi, yi)
 
-        # de-dup after rounding
         out = []
         seen = set()
         for xi, yi in pts:
@@ -358,7 +331,6 @@ def main():
             seen.add(key)
             out.append([xi_i, yi_i])
 
-        # ensure at least one robust point (center) if everything deduped away
         if not out:
             mid_t = total * 0.5
             j = int(np.searchsorted(cum, mid_t, side="right"))
@@ -370,7 +342,6 @@ def main():
             out = [[int(round(xi)), int(round(yi))]]
 
         return out
-
 
     # For positives: one list of points **per object/stroke**
     pos_seeds = []
@@ -407,40 +378,20 @@ def main():
         cap = cv2.VideoCapture(part)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=torch.float16):
+        amp_dtype = torch.float16 if DEVICE == "cuda" else torch.bfloat16
+        with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=amp_dtype, enabled=True):
             state = predictor.init_state(part)
-            # for oid, (sx, sy) in enumerate(seeds):
-            #     # Add positive seed point
-            #     pos_points = [[sx, sy]]
-            #     pos_labels = [1]
-                
-            #     # Add negative seed points if they exist
-            #     neg_points = [[nx, ny] for nx, ny in neg_seeds]
-            #     neg_labels = [0] * len(neg_seeds)
-                
-            #     # Combine positive and negative points
-            #     all_points = pos_points + neg_points
-            #     all_labels = pos_labels + neg_labels
-                
-            #     predictor.add_new_points_or_box(
-            #         state, frame_idx=selected_frame,
-            #         points=all_points, labels=all_labels, obj_id=oid
-            #     )
 
-            # pick seed frame per part:
+            # per-part seed frame: part 0 uses selected frame, later parts start at 0
             if idx == 0:
-                # clamp user-selected frame to this part's range
                 seed_f = max(0, min(selected_frame, frame_count - 1))
             else:
-                # for later parts always start at local frame 0
                 seed_f = 0
 
+            # Seed objects
             for oid, pos_pts in enumerate(pos_seeds):
-                # Positive prompts: multiple points per object
                 pos_labels = [1] * len(pos_pts)
-                # Negative prompts: shared "avoid" hints
                 neg_labels = [0] * len(neg_points)
-                # Combine prompts
                 all_points = pos_pts + neg_points
                 all_labels = pos_labels + neg_labels
 
@@ -452,7 +403,14 @@ def main():
                     obj_id=oid
                 )
 
+            # Health + recovery state (for disappearance/re-appearance)
             last_masks = {}
+            lost_streak = {oid: 0 for oid in range(n_objs)}
+            last_good_bbox = {oid: None for oid in range(n_objs)}
+            last_good_tmpl = {oid: None for oid in range(n_objs)}
+            TMPL_MAX_SIDE = 96
+            RECOVER_THRESH = 5
+            TM_SCORE_MIN = 0.55
 
             frame_counter = 0
             for lf, object_ids, masks in tqdm(
@@ -465,17 +423,75 @@ def main():
                 if not ret:
                     continue
 
-                # Periodic memory cleanup every 50 frames
                 frame_counter += 1
-                if frame_counter % 50 == 0:
+                if torch.cuda.is_available() and frame_counter % 50 == 0:
                     torch.cuda.empty_cache()
 
+                # Per-object processing + recovery
                 for oid, mask in zip(object_ids, masks):
-                    m = mask.squeeze().cpu().numpy()
+                    m = mask.squeeze().detach().cpu().numpy()
                     ys, xs = np.where(m > 0.5)
-                    xmin, xmax = (xs.min(), xs.max()) if xs.size else (None, None)
-                    ymin, ymax = (ys.min(), ys.max()) if ys.size else (None, None)
 
+                    if xs.size:
+                        xmin, xmax = int(xs.min()), int(xs.max())
+                        ymin, ymax = int(ys.min()), int(ys.max())
+
+                        # valid mask → reset loss, save bbox + small template
+                        lost_streak[oid] = 0
+                        last_good_bbox[oid] = (xmin, ymin, xmax, ymax)
+
+                        inset = 4
+                        x0 = max(xmin + inset, 0); y0 = max(ymin + inset, 0)
+                        x1 = max(x0 + 1, xmax - inset); y1 = max(y0 + 1, ymax - inset)
+                        crop = frame[y0:y1, x0:x1]
+                        if crop.size:
+                            h, w = crop.shape[:2]
+                            scale = min(1.0, TMPL_MAX_SIDE / max(h, w))
+                            if scale < 1.0:
+                                crop = cv2.resize(crop, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+                            last_good_tmpl[oid] = crop
+                    else:
+                        xmin = xmax = ymin = ymax = None
+                        lost_streak[oid] += 1
+
+                        if lost_streak[oid] >= RECOVER_THRESH and last_good_tmpl[oid] is not None:
+                            tmpl = last_good_tmpl[oid]
+                            H, W = frame.shape[:2]
+                            h, w = tmpl.shape[:2]
+                            if 10 <= h < H and 10 <= w < W:
+                                res = cv2.matchTemplate(frame, tmpl, cv2.TM_CCOEFF_NORMED)
+                                _, maxVal, _, maxLoc = cv2.minMaxLoc(res)
+                                if maxVal >= TM_SCORE_MIN:
+                                    px, py = maxLoc
+                                    cx = px + w // 2
+                                    cy = py + h // 2
+                                    bx0, by0 = px, py
+                                    bx1, by1 = min(W-1, px + w), min(H-1, py + h)
+
+                                    points = [[int(cx), int(cy)]] + neg_points
+                                    labels = [1] + [0]*len(neg_points)
+                                    try:
+                                        predictor.add_new_points_or_box(
+                                            state,
+                                            frame_idx=lf,
+                                            points=points,
+                                            labels=labels,
+                                            box=(bx0, by0, bx1, by1),
+                                            obj_id=oid
+                                        )
+                                    except TypeError:
+                                        # no box support: emulate with point-only reseed
+                                        predictor.add_new_points_or_box(
+                                            state,
+                                            frame_idx=lf,
+                                            points=points,
+                                            labels=labels,
+                                            obj_id=oid
+                                        )
+                                    # avoid thrashing: reduce streak so we don't reseed every frame
+                                    lost_streak[oid] = max(0, RECOVER_THRESH - 2)
+
+                    # record (even if bbox is None)
                     track_records.append({
                         'part_idx': idx,
                         'local_frame': lf,
@@ -485,55 +501,56 @@ def main():
                         'xmax': xmax, 'ymax': ymax
                     })
 
-                    overlay = overlay_mask(frame, mask)
-                    if (lf < MAX_SAVE_OVERLAY):
+                    # overlay (optional limit)
+                    if lf < MAX_SAVE_OVERLAY:
+                        overlay = overlay_mask(frame, mask)
                         fname = f"part{idx:02d}_obj{oid}_f{lf:04d}.png"
                         cv2.imwrite(os.path.join(OUTPUT_DIR, "overlays", fname), overlay)
+
                     last_masks[oid] = mask
 
         cap.release()
 
         # Clear GPU memory after each part
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
         del state
-        import gc
         gc.collect()
         print(f"[info] Cleared GPU memory after part {idx}")
 
-        # reseed for next part
-        if idx < len(parts) - 1:
+        # reseed for next part (simple centroid hand-off; robust disappear/reappear handled above)
+        if idx < len(parts) - 1 and n_objs > 0:
             new_centroids = []
             for oid in range(n_objs):
                 lm = last_masks.get(oid)
                 if lm is not None:
-                    ys, xs = np.where(lm.squeeze().cpu().numpy() > 0.5)
+                    arr = lm.squeeze().detach().cpu().numpy()
+                    ys, xs = np.where(arr > 0.5)
                     if xs.size:
-                        # new_seeds.append((int(xs.mean()), int(ys.mean())))
                         new_centroids.append((int(xs.mean()), int(ys.mean())))
                     else:
-                        # new_seeds.append(seeds[oid])
                         new_centroids.append(seed_centroids[oid])
                 else:
                     new_centroids.append(seed_centroids[oid])
 
-            # For the next part, prompt with **one** stable point per object (centroid)
+            # Next part: one stable point/object (we still do box+template recovery in-loop)
             pos_seeds = [[[cx, cy]] for (cx, cy) in new_centroids]
-            seed_centroids = new_centroids  # update fallback
+            seed_centroids = new_centroids
 
-    # Apply frame offset to global frame numbers
-    frame_offset_file = os.path.join(OUTPUT_DIR, "selected_frame_offset.txt")
+    # metadata: save selected frame offset (no arithmetic shift)
     frame_offset = 0
     if os.path.exists(frame_offset_file):
         with open(frame_offset_file, 'r') as f:
             frame_offset = int(f.read().strip())
         print(f"[info] Seed frame (no shift applied): {frame_offset}")
-        
-        # Adjust global frame numbers
-        for record in track_records:
-            record['global_frame'] = record['global_frame']
-            record['frame_offset'] = frame_offset
+
+    for record in track_records:
+        record['frame_offset'] = frame_offset
 
     # save tracking CSV
     track_df = pd.DataFrame(track_records)
@@ -545,12 +562,10 @@ def main():
     PARTS = parts
     track_df = pd.read_csv(track_csv)
     grouped = [(pid, df.reset_index(drop=True)) for pid, df in track_df.groupby('part_idx')]
-
     total_rows = sum(len(df) for _, df in grouped)
     print(f"Phase B: {len(grouped)} parts, {total_rows} rows to evaluate.")
 
     gaze_results = []
-
     if os.environ.get("GAZE_SINGLE_PROCESS") == "1":
         for item in tqdm(grouped, total=len(grouped), desc="Phase B parts (single)"):
             gaze_results.extend(process_gaze_group(item))
@@ -566,14 +581,14 @@ def main():
                     print(f"[WARN] Phase B: part {pid} failed with: {e}")
 
     gaze_df = pd.DataFrame(gaze_results)
-    gaze_df.sort_values(['frame','object_id'], inplace=True)
-
-    # ---- NEW: per-object True/False per frame (wide format) ----
-    gaze_df['hit'] = gaze_df['hit'].astype(bool)
-    wide = gaze_df.pivot(index='frame', columns='object_id', values='hit').fillna(False)
-    # name columns as obj_0, obj_1, ...
-    wide.columns = [f'obj_{int(c)}' for c in wide.columns]
-    wide = wide.reset_index().sort_values('frame')
+    if not gaze_df.empty:
+        gaze_df.sort_values(['frame','object_id'], inplace=True)
+        gaze_df['hit'] = gaze_df['hit'].astype(bool)
+        wide = gaze_df.pivot(index='frame', columns='object_id', values='hit').fillna(False)
+        wide.columns = [f'obj_{int(c)}' for c in wide.columns]
+        wide = wide.reset_index().sort_values('frame')
+    else:
+        wide = pd.DataFrame(columns=['frame'])
 
     # ensure gaze_data dir exists
     gaze_dir = os.path.join(OUTPUT_DIR, "gaze_data")
@@ -582,17 +597,26 @@ def main():
     # write both files
     gaze_csv_long = os.path.join(gaze_dir, "gaze_hits.csv")
     gaze_csv_wide = os.path.join(gaze_dir, "gaze_hits_per_frame.csv")
-    gaze_df.to_csv(gaze_csv_long, index=False)   # long (as before)
-    wide.to_csv(gaze_csv_wide, index=False)      # wide with True/False per object
+    gaze_df.to_csv(gaze_csv_long, index=False)
+    wide.to_csv(gaze_csv_wide, index=False)
 
-    # Optional console print per frame: set PRINT_GAZE_PER_FRAME=1 to enable
-    if os.environ.get("PRINT_GAZE_PER_FRAME") == "1":
+    if os.environ.get("PRINT_GAZE_PER_FRAME") == "1" and not wide.empty:
         for _, row in wide.iterrows():
             frame = int(row['frame'])
             status = {k: bool(row[k]) for k in row.index if k != 'frame'}
             print(f"[Gaze] frame {frame}: {status}")
 
     print(f"\nPhase B complete: saved → {gaze_csv_long} and {gaze_csv_wide}")
+
+    # final cleanup
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
 
 if __name__ == "__main__":
     main()
