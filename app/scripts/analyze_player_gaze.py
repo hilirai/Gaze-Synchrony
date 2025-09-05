@@ -19,8 +19,8 @@ MODEL_CFG   = "/configs/sam2.1/sam2.1_hiera_b+.yaml"
 VIDEO_DIR   = os.environ.get("VIDEO_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/video_parts")
 OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/output")
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-GAZE_RADIUS = 50  # pixels
-
+GAZE_RADIUS = 100  # pixels
+MAX_SAVE_OVERLAY = 250
 # Configure PyTorch CUDA memory management
 if torch.cuda.is_available():
     torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
@@ -143,6 +143,7 @@ def main():
     os.makedirs(os.path.join(OUTPUT_DIR, "overlays"), exist_ok=True)
     print("video dir", VIDEO_DIR)
     parts = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
+    parts = parts[:2]
     if not parts:
         raise RuntimeError(f"No video_part_*.mp4 in {VIDEO_DIR}")
     offsets, cum = [], 0
@@ -248,25 +249,155 @@ def main():
         f.write(str(selected_frame))
     print(f"[info] Saved frame offset {selected_frame} to {frame_offset_file}")
 
-    # Turn positive strokes into seed points (centroids)
-    seeds = []
+    # # Turn positive strokes into seed points (centroids)
+    # seeds = []
+    # for stroke in strokes.get("pos", []):
+    #     if not stroke:
+    #         continue
+    #     xs, ys = zip(*stroke)
+    #     seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
+    
+    # # Turn negative strokes into negative seed points (centroids)
+    # neg_seeds = []
+    # for stroke in strokes.get("neg", []):
+    #     if not stroke:
+    #         continue
+    #     xs, ys = zip(*stroke)
+    #     neg_seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
+    
+    # n_objs = len(seeds)
+    # n_neg = len(neg_seeds)
+    # print(f"Loaded {n_objs} positive seed points and {n_neg} negative seed points from scribbles.")
+
+    # --- Multi-point sampling along strokes (more robust than a single centroid) ---
+    # Configurable sampling (env vars), with sensible defaults
+    POS_SAMPLING_STEP = int(os.environ.get("POS_SAMPLING_STEP", "8"))    # take every Nth vertex of a positive stroke
+    POS_SAMPLING_CAP  = int(os.environ.get("POS_SAMPLING_CAP",  "12"))   # limit max positive points per stroke
+    NEG_SAMPLING_STEP = int(os.environ.get("NEG_SAMPLING_STEP", "8"))    # take every Nth vertex of a negative stroke
+    NEG_SAMPLING_CAP  = int(os.environ.get("NEG_SAMPLING_CAP",  "5"))   # limit max negative points total
+    SAMPLING_STRATEGY = "uniform" 
+    def _sample_points(stroke, step, cap):
+        """
+        Return up to `cap` points from `stroke` according to SAMPLING_STRATEGY.
+        - "stride": take every `step`-th vertex, then first `cap`.
+        - "uniform": sample *interior* points by arc-length (exclude endpoints),
+                    enforce min spacing, and cap to a small count (3–5 is ideal).
+        """
+        if not stroke:
+            return []
+
+        if SAMPLING_STRATEGY == "stride":
+            pts = stroke[::max(1, step)]
+            pts = pts[:cap]
+            return [[int(x), int(y)] for x, y in pts]
+
+        # --- uniform (SAM-friendly) ---
+        xs = np.asarray([p[0] for p in stroke], dtype=np.float32)
+        ys = np.asarray([p[1] for p in stroke], dtype=np.float32)
+
+        if xs.size == 1:
+            return [[int(xs[0]), int(ys[0])]]
+
+        dx = np.diff(xs); dy = np.diff(ys)
+        seg = np.hypot(dx, dy)
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        total = float(cum[-1])
+        if total == 0.0:
+            return [[int(xs[0]), int(ys[0])]]
+
+        # Prefer a *small* number of interior positives
+        # (SAM2 usually works best with ~3–5)
+        hard_cap = int(min(cap, 5))
+        if hard_cap <= 1:
+            # pick a robust "middle" point
+            mid_t = total * 0.5
+            j = int(np.searchsorted(cum, mid_t, side="right"))
+            j = max(1, min(j, cum.size - 1))
+            t0, t1 = cum[j-1], cum[j]
+            alpha = 0.0 if t1 == t0 else (mid_t - t0) / (t1 - t0)
+            xi = xs[j-1] + alpha * (xs[j] - xs[j-1])
+            yi = ys[j-1] + alpha * (ys[j] - ys[j-1])
+            return [[int(round(xi)), int(round(yi))]]
+
+        # Exclude endpoints (avoid borders) and bias toward the interior band
+        # e.g., 10%..90% of the arc length
+        interior_lo, interior_hi = 0.10, 0.90
+        targets = np.linspace(total * interior_lo, total * interior_hi, num=hard_cap)
+
+        pts = []
+        last_accepted = None
+        min_sep = 6.0  # px; increase to 8–10 if you still see clumps
+
+        j = 1
+        for t in targets:
+            # find segment
+            while j < cum.size and cum[j] < t:
+                j += 1
+            j = min(j, cum.size - 1)
+            t0, t1 = cum[j-1], cum[j]
+            if t1 == t0:
+                xi, yi = xs[j], ys[j]
+            else:
+                alpha = (t - t0) / (t1 - t0)
+                xi = xs[j-1] + alpha * (xs[j] - xs[j-1])
+                yi = ys[j-1] + alpha * (ys[j] - ys[j-1])
+
+            # spacing filter
+            if last_accepted is None or np.hypot(xi - last_accepted[0], yi - last_accepted[1]) >= min_sep:
+                pts.append([xi, yi])
+                last_accepted = (xi, yi)
+
+        # de-dup after rounding
+        out = []
+        seen = set()
+        for xi, yi in pts:
+            xi_i, yi_i = int(round(xi)), int(round(yi))
+            key = (xi_i, yi_i)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append([xi_i, yi_i])
+
+        # ensure at least one robust point (center) if everything deduped away
+        if not out:
+            mid_t = total * 0.5
+            j = int(np.searchsorted(cum, mid_t, side="right"))
+            j = max(1, min(j, cum.size - 1))
+            t0, t1 = cum[j-1], cum[j]
+            alpha = 0.0 if t1 == t0 else (mid_t - t0) / (t1 - t0)
+            xi = xs[j-1] + alpha * (xs[j] - xs[j-1])
+            yi = ys[j-1] + alpha * (ys[j] - ys[j-1])
+            out = [[int(round(xi)), int(round(yi))]]
+
+        return out
+
+
+    # For positives: one list of points **per object/stroke**
+    pos_seeds = []
     for stroke in strokes.get("pos", []):
         if not stroke:
             continue
-        xs, ys = zip(*stroke)
-        seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
-    
-    # Turn negative strokes into negative seed points (centroids)
-    neg_seeds = []
+        pos_seeds.append(_sample_points(stroke, POS_SAMPLING_STEP, POS_SAMPLING_CAP))
+
+    # Keep centroids as a fallback (used later for reseeding between parts)
+    seed_centroids = []
+    for pts in pos_seeds:
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        cx = int(sum(xs)/len(xs)); cy = int(sum(ys)/len(ys))
+        seed_centroids.append((cx, cy))
+
+    # For negatives: flatten all sampled points into one shared list
+    neg_points = []
     for stroke in strokes.get("neg", []):
         if not stroke:
             continue
-        xs, ys = zip(*stroke)
-        neg_seeds.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
-    
-    n_objs = len(seeds)
-    n_neg = len(neg_seeds)
-    print(f"Loaded {n_objs} positive seed points and {n_neg} negative seed points from scribbles.")
+        neg_points.extend(_sample_points(stroke, NEG_SAMPLING_STEP, NEG_SAMPLING_CAP))
+
+    n_objs = len(pos_seeds)
+    total_pos_pts = sum(len(pts) for pts in pos_seeds)
+    n_neg = len(neg_points)
+    print(f"Loaded {n_objs} objects from scribbles "
+          f"({total_pos_pts} positive points total) and {n_neg} negative points.")
 
     predictor = build_sam2_video_predictor(MODEL_CFG, CHECKPOINT)
     track_records = []
@@ -278,23 +409,41 @@ def main():
 
         with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=torch.float16):
             state = predictor.init_state(part)
-            for oid, (sx, sy) in enumerate(seeds):
-                # Add positive seed point
-                pos_points = [[sx, sy]]
-                pos_labels = [1]
+            # for oid, (sx, sy) in enumerate(seeds):
+            #     # Add positive seed point
+            #     pos_points = [[sx, sy]]
+            #     pos_labels = [1]
                 
-                # Add negative seed points if they exist
-                neg_points = [[nx, ny] for nx, ny in neg_seeds]
-                neg_labels = [0] * len(neg_seeds)
+            #     # Add negative seed points if they exist
+            #     neg_points = [[nx, ny] for nx, ny in neg_seeds]
+            #     neg_labels = [0] * len(neg_seeds)
                 
-                # Combine positive and negative points
-                all_points = pos_points + neg_points
+            #     # Combine positive and negative points
+            #     all_points = pos_points + neg_points
+            #     all_labels = pos_labels + neg_labels
+                
+            #     predictor.add_new_points_or_box(
+            #         state, frame_idx=selected_frame,
+            #         points=all_points, labels=all_labels, obj_id=oid
+            #     )
+
+            for oid, pos_pts in enumerate(pos_seeds):
+                # Positive prompts: multiple points per object
+                pos_labels = [1] * len(pos_pts)
+                # Negative prompts: shared "avoid" hints
+                neg_labels = [0] * len(neg_points)
+                # Combine prompts
+                all_points = pos_pts + neg_points
                 all_labels = pos_labels + neg_labels
-                
+
                 predictor.add_new_points_or_box(
-                    state, frame_idx=selected_frame,
-                    points=all_points, labels=all_labels, obj_id=oid
+                    state,
+                    frame_idx=selected_frame,
+                    points=all_points,
+                    labels=all_labels,
+                    obj_id=oid
                 )
+
             last_masks = {}
 
             frame_counter = 0
@@ -329,14 +478,17 @@ def main():
                     })
 
                     overlay = overlay_mask(frame, mask)
-                    fname = f"part{idx:02d}_obj{oid}_f{lf:04d}.png"
-                    cv2.imwrite(os.path.join(OUTPUT_DIR, "overlays", fname), overlay)
+                    if (lf < MAX_SAVE_OVERLAY):
+                        fname = f"part{idx:02d}_obj{oid}_f{lf:04d}.png"
+                        cv2.imwrite(os.path.join(OUTPUT_DIR, "overlays", fname), overlay)
                     last_masks[oid] = mask
 
         cap.release()
 
         # Clear GPU memory after each part
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
         del state
         import gc
         gc.collect()
@@ -344,18 +496,23 @@ def main():
 
         # reseed for next part
         if idx < len(parts) - 1:
-            new_seeds = []
+            new_centroids = []
             for oid in range(n_objs):
                 lm = last_masks.get(oid)
                 if lm is not None:
                     ys, xs = np.where(lm.squeeze().cpu().numpy() > 0.5)
                     if xs.size:
-                        new_seeds.append((int(xs.mean()), int(ys.mean())))
+                        # new_seeds.append((int(xs.mean()), int(ys.mean())))
+                        new_centroids.append((int(xs.mean()), int(ys.mean())))
                     else:
-                        new_seeds.append(seeds[oid])
+                        # new_seeds.append(seeds[oid])
+                        new_centroids.append(seed_centroids[oid])
                 else:
-                    new_seeds.append(seeds[oid])
-            seeds = new_seeds
+                    new_centroids.append(seed_centroids[oid])
+
+            # For the next part, prompt with **one** stable point per object (centroid)
+            pos_seeds = [[[cx, cy]] for (cx, cy) in new_centroids]
+            seed_centroids = new_centroids  # update fallback
 
     # Apply frame offset to global frame numbers
     frame_offset_file = os.path.join(OUTPUT_DIR, "selected_frame_offset.txt")
@@ -363,11 +520,11 @@ def main():
     if os.path.exists(frame_offset_file):
         with open(frame_offset_file, 'r') as f:
             frame_offset = int(f.read().strip())
-        print(f"[info] Applying frame offset: {frame_offset}")
+        print(f"[info] Seed frame (no shift applied): {frame_offset}")
         
         # Adjust global frame numbers
         for record in track_records:
-            record['global_frame'] = record['global_frame'] + frame_offset
+            record['global_frame'] = record['global_frame']
             record['frame_offset'] = frame_offset
 
     # save tracking CSV
