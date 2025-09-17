@@ -143,13 +143,6 @@ Video Segments   Overlays               Wide Format               Visualizations
 - **Statistical Analysis**: Pandas + NumPy + SciPy
 - **Visualization**: Matplotlib
 
-## Performance Characteristics
-
-- **Processing Speed**: ~1-2 minutes per minute of video (GPU)
-- **Memory Usage**: ~8GB GPU RAM for typical videos
-- **Accuracy**: >95% gaze detection under good lighting
-- **Scalability**: Handles videos up to 30 minutes per participant
-
 ## Common Issues & Solutions
 
 | Issue | Cause | Solution |
@@ -159,11 +152,3 @@ Video Segments   Overlays               Wide Format               Visualizations
 | Web interface timeout | Slow user selection | Increase timeout in Flask config |
 | Synchrony rate too low/high | Misaligned videos | Check frame offset calculation |
 
-## Research Applications
-
-This pipeline supports analysis of:
-- **Cooperative vs. Competitive Tasks**: Different synchrony patterns
-- **Task Complexity Effects**: Synchrony changes with difficulty
-- **Individual Differences**: Personality/skill impact on synchrony
-- **Temporal Dynamics**: How synchrony evolves during tasks
-- **Object-Specific Patterns**: Which AOIs drive synchrony
