@@ -12,15 +12,24 @@ import webbrowser
 import subprocess
 import threading
 import time
+import argparse  
+
+# ====== ARGPARSE ======
+parser = argparse.ArgumentParser(description="Gaze analysis pipeline")
+parser.add_argument(
+    "--phase-b-only", action="store_true",
+    help="Skip Phase A (seed selection) and run only Phase B using existing track_file.csv"
+)
+args = parser.parse_args()
 
 # ====== CONFIG ======
-CHECKPOINT  = "/home/administrator/sam2/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
-MODEL_CFG   = "/configs/sam2.1/sam2.1_hiera_b+.yaml"
+CHECKPOINT  = "/home/administrator/sam2/sam2/checkpoints/sam2.1_hiera_tiny.pt"
+MODEL_CFG   = "/configs/sam2.1/sam2.1_hiera_t.yaml"
 VIDEO_DIR   = os.environ.get("VIDEO_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/video_parts")
 OUTPUT_DIR  = os.environ.get("OUTPUT_DIR", "/sam2/Gaze-Synchrony/app/data/player_1/output")
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 GAZE_RADIUS = 100  # pixels
-MAX_SAVE_OVERLAY = 100
+MAX_SAVE_OVERLAY = 10
 # Configure PyTorch CUDA memory management
 if torch.cuda.is_available():
     torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
@@ -142,8 +151,59 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(OUTPUT_DIR, "overlays"), exist_ok=True)
     print("video dir", VIDEO_DIR)
+
+    # ====== Phase B Only Check ======
+    if args.phase_b_only:
+        print("[info] Phase B only mode: skipping Phase A (seed selection)")
+
+        track_csv = os.path.join(OUTPUT_DIR, "track_file.csv")
+        if not os.path.exists(track_csv):
+            raise RuntimeError("track_file.csv not found! Run Phase A first.")
+
+        track_df = pd.read_csv(track_csv)
+        grouped = [(pid, df.reset_index(drop=True)) for pid, df in track_df.groupby('part_idx')]
+        PARTS = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
+
+        total_rows = sum(len(df) for _, df in grouped)
+        print(f"[info] Phase B only: {len(grouped)} parts, {total_rows} rows to evaluate.")
+
+        gaze_results = []
+
+        if os.environ.get("GAZE_SINGLE_PROCESS") == "1":
+            for item in tqdm(grouped, total=len(grouped), desc="Phase B parts (single)"):
+                gaze_results.extend(process_gaze_group(item))
+        else:
+            with ProcessPoolExecutor(max_workers=min(len(grouped), os.cpu_count() or 1)) as pool:
+                futures = {pool.submit(process_gaze_group, item): item[0] for item in grouped}
+                for fut in tqdm(as_completed(futures), total=len(futures), desc="Phase B parts"):
+                    pid = futures[fut]
+                    try:
+                        part_res = fut.result()
+                        gaze_results.extend(part_res)
+                    except Exception as e:
+                        print(f"[WARN] Phase B: part {pid} failed with: {e}")
+
+        gaze_df = pd.DataFrame(gaze_results)
+        gaze_df.sort_values(['frame','object_id'], inplace=True)
+        gaze_df['hit'] = gaze_df['hit'].astype(bool)
+        wide = gaze_df.pivot(index='frame', columns='object_id', values='hit').fillna(False)
+        wide.columns = [f'obj_{int(c)}' for c in wide.columns]
+        wide = wide.reset_index().sort_values('frame')
+
+        gaze_dir = os.path.join(OUTPUT_DIR, "gaze_data")
+        os.makedirs(gaze_dir, exist_ok=True)
+
+        gaze_csv_long = os.path.join(gaze_dir, "gaze_hits.csv")
+        gaze_csv_wide = os.path.join(gaze_dir, "gaze_hits_per_frame.csv")
+        gaze_df.to_csv(gaze_csv_long, index=False)
+        wide.to_csv(gaze_csv_wide, index=False)
+
+        print(f"[info] Phase B complete: saved → {gaze_csv_long} and {gaze_csv_wide}")
+        return  
+
+    # ====== Phase A (Regular Run) ======
+
     parts = sorted(glob.glob(os.path.join(VIDEO_DIR, "video_part_*.mp4")))
-    parts = parts[:2]
     if not parts:
         raise RuntimeError(f"No video_part_*.mp4 in {VIDEO_DIR}")
     offsets, cum = [], 0
@@ -248,6 +308,22 @@ def main():
     with open(frame_offset_file, 'w') as f:
         f.write(str(selected_frame))
     print(f"[info] Saved frame offset {selected_frame} to {frame_offset_file}")
+
+    # Clean up all grid frames after user selection
+    for frame_idx in range(50):
+        grid_filename = f"seed_grid_frame_{frame_idx}.jpg"
+        for directory in [OUTPUT_DIR, SCRIBBLE_STATIC_DIR]:
+            grid_path = os.path.join(directory, grid_filename)
+            if os.path.exists(grid_path):
+                os.remove(grid_path)
+
+    # Also remove the default seed_grid.jpg files
+    for directory in [OUTPUT_DIR, SCRIBBLE_STATIC_DIR]:
+        default_grid = os.path.join(directory, "seed_grid.jpg")
+        if os.path.exists(default_grid):
+            os.remove(default_grid)
+
+    print(f"[info] Cleaned up all grid frames after user selection")
 
     # # Turn positive strokes into seed points (centroids)
     # seeds = []
@@ -399,6 +475,12 @@ def main():
     print(f"Loaded {n_objs} objects from scribbles "
           f"({total_pos_pts} positive points total) and {n_neg} negative points.")
 
+    # Force memory cleanup before loading the heavy SAM2 model
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"[info] GPU memory before model loading: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated")
+
     predictor = build_sam2_video_predictor(MODEL_CFG, CHECKPOINT)
     track_records = []
 
@@ -502,25 +584,45 @@ def main():
         gc.collect()
         print(f"[info] Cleared GPU memory after part {idx}")
 
-        # reseed for next part
-        if idx < len(parts) - 1:
-            new_centroids = []
-            for oid in range(n_objs):
-                lm = last_masks.get(oid)
-                if lm is not None:
-                    ys, xs = np.where(lm.squeeze().cpu().numpy() > 0.5)
-                    if xs.size:
-                        # new_seeds.append((int(xs.mean()), int(ys.mean())))
-                        new_centroids.append((int(xs.mean()), int(ys.mean())))
-                    else:
-                        # new_seeds.append(seeds[oid])
-                        new_centroids.append(seed_centroids[oid])
-                else:
-                    new_centroids.append(seed_centroids[oid])
+    new_pos_seeds = None
+    new_centroids = None
+    # reseed for next part
+    if idx < len(parts) - 1:
+        new_pos_seeds = []
+        new_centroids = []
 
-            # For the next part, prompt with **one** stable point per object (centroid)
-            pos_seeds = [[[cx, cy]] for (cx, cy) in new_centroids]
-            seed_centroids = new_centroids  # update fallback
+        for oid in range(n_objs):
+            lm = last_masks.get(oid)
+            if lm is not None:
+                m = lm.squeeze().cpu().numpy()
+                ys, xs = np.where(m > 0.5)
+
+                if xs.size:
+                    coords = np.stack([xs, ys], axis=1)
+                    # sample up to 5 well-spaced points across the mask
+                    num_samples = min(5, len(coords))
+                    idxs = np.linspace(0, len(coords) - 1, num=num_samples, dtype=int)
+                    sampled_pts = coords[idxs].tolist()
+
+                    new_pos_seeds.append(sampled_pts)
+
+                    # also compute centroid as fallback
+                    cx, cy = int(xs.mean()), int(ys.mean())
+                    new_centroids.append((cx, cy))
+                else:
+                    # fallback to previous centroid if mask empty
+                    cx, cy = seed_centroids[oid]
+                    new_pos_seeds.append([[cx, cy]])
+                    new_centroids.append((cx, cy))
+            else:
+                # fallback if no last mask
+                cx, cy = seed_centroids[oid]
+                new_pos_seeds.append([[cx, cy]])
+                new_centroids.append((cx, cy))
+
+    # update seeds for next part
+    pos_seeds = new_pos_seeds
+    seed_centroids = new_centroids
 
     # Apply frame offset to global frame numbers
     frame_offset_file = os.path.join(OUTPUT_DIR, "selected_frame_offset.txt")
