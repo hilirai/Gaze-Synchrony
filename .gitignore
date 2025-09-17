@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.sam_venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+
+# Virtual environments
+.env
+.ENV
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Data files (large files that shouldn't be committed)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+*.m4v
+
+# Large datasets
+data/raw/
+data/processed/
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.hdf5
+
+# Model checkpoints and weights (very large)
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+checkpoints/
+models/
+weights/
+
+# Output files
+results/
+outputs/
+figures/
+plots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.eps
+*.svg
+
+# Temporary files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.tmp
+*.temp
+workspace/
+logs/
+*.log
+
+# Config files with sensitive info
+config_local.yaml
+.env.local
+secrets.yaml
+
+# OS generated files
+.directory
+.fuse_hidden*
+.nfs*
+
+# SAM2 specific
+sam2/
+segment-anything-2/
+
+# Flask
+instance/
+.webassets-cache
+
+# pytest
+.cache/
+.pytest_cache/

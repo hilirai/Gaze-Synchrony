@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
-"""
-Multi-Condition Gaze Synchronization Analysis
+"""Multi-condition gaze synchronization analysis.
+
 Analyzes synchronization across multiple conditions (solo, cooperation, competition)
 and generates histogram and timeline visualizations.
 
 Usage:
     python multi_condition_analysis.py <results_directory>
-
-Directory structure expected:
-    results/
-    ├── solo/
-    │   ├── pair_01/sync_analysis.csv
-    │   ├── pair_02/sync_analysis.csv
-    │   └── ...
-    ├── cooperation/
-    │   ├── pair_01/sync_analysis.csv
-    │   └── ...
-    └── competition/
-        ├── pair_01/sync_analysis.csv
-        └── ...
 """
 
 import os
@@ -33,15 +20,9 @@ from pathlib import Path
 import json
 
 def load_condition_data(results_dir):
-    """
-    Load synchronization data for all conditions and pairs.
-    
-    Returns:
-        dict: {condition: {pair: sync_df, ...}, ...}
-    """
+    """Load synchronization data for all conditions and pairs."""
     conditions_data = {}
     
-    # Find all condition directories
     condition_dirs = [d for d in os.listdir(results_dir) 
                      if os.path.isdir(os.path.join(results_dir, d))]
     
@@ -49,7 +30,6 @@ def load_condition_data(results_dir):
         condition_path = os.path.join(results_dir, condition)
         conditions_data[condition] = {}
         
-        # Find all pair directories in this condition
         pair_dirs = [d for d in os.listdir(condition_path) 
                     if os.path.isdir(os.path.join(condition_path, d))]
         
@@ -68,12 +48,7 @@ def load_condition_data(results_dir):
     return conditions_data
 
 def calculate_condition_statistics(conditions_data):
-    """
-    Calculate synchronization statistics for each condition.
-    
-    Returns:
-        dict: {condition: {'avg_sync_percent': float, 'pairs': list, 'frames': int}}
-    """
+    """Calculate synchronization statistics for each condition."""
     stats = {}
     
     for condition, pairs_data in conditions_data.items():
@@ -84,7 +59,6 @@ def calculate_condition_statistics(conditions_data):
         total_frames = 0
         
         for pair, sync_df in pairs_data.items():
-            # Calculate sync percentage for this pair
             has_sync = (sync_df['sync_count'] > 0).sum()
             total_pair_frames = len(sync_df)
             sync_percentage = (has_sync / total_pair_frames) * 100 if total_pair_frames > 0 else 0
@@ -104,9 +78,7 @@ def calculate_condition_statistics(conditions_data):
     return stats
 
 def create_histogram(stats, output_dir):
-    """
-    Create histogram showing average synchronization percentage by condition.
-    """
+    """Create histogram showing average synchronization percentage by condition."""
     conditions = list(stats.keys())
     averages = [stats[cond]['avg_sync_percent'] for cond in conditions]
     std_devs = [stats[cond]['std_sync_percent'] for cond in conditions]
@@ -115,7 +87,6 @@ def create_histogram(stats, output_dir):
     bars = plt.bar(conditions, averages, yerr=std_devs, capsize=5, 
                    color=['#FF6B6B', '#4ECDC4', '#45B7D1'], alpha=0.8)
     
-    # Add value labels on bars
     for bar, avg, std in zip(bars, averages, std_devs):
         height = bar.get_height()
         plt.text(bar.get_x() + bar.get_width()/2., height + std + 1,
@@ -127,13 +98,13 @@ def create_histogram(stats, output_dir):
     plt.ylim(0, max(averages) + max(std_devs) + 10)
     plt.grid(axis='y', alpha=0.3)
     
-    # Add sample size annotations
     for i, (condition, avg) in enumerate(zip(conditions, averages)):
         n_pairs = stats[condition]['num_pairs']
         plt.text(i, -5, f'n={n_pairs} pairs', ha='center', va='top', fontsize=10, alpha=0.7)
     
     plt.tight_layout()
     histogram_path = os.path.join(output_dir, 'synchronization_histogram.png')
+    os.makedirs(output_dir, exist_ok=True)
     plt.savefig(histogram_path, dpi=300, bbox_inches='tight')
     plt.close()
     
@@ -141,35 +112,28 @@ def create_histogram(stats, output_dir):
     return histogram_path
 
 def calculate_timeline_probabilities(conditions_data):
-    """
-    Calculate synchronization probability over time for each condition.
-    """
+    """Calculate synchronization probability over time for each condition."""
     timeline_probs = {}
     
     for condition, pairs_data in conditions_data.items():
         if not pairs_data:
             continue
             
-        # Find the maximum frame number across all pairs in this condition
         max_frame = 0
         for sync_df in pairs_data.values():
             max_frame = max(max_frame, sync_df['frame'].max())
         
-        # Create probability array for each time point
         prob_by_frame = []
         
         for frame_num in range(1, max_frame + 1):
             frame_syncs = []
             
             for pair, sync_df in pairs_data.items():
-                # Find this frame in the pair's data
                 frame_data = sync_df[sync_df['frame'] == frame_num]
                 if not frame_data.empty:
-                    # 1 if sync_count > 0, 0 otherwise
                     has_sync = 1 if frame_data.iloc[0]['sync_count'] > 0 else 0
                     frame_syncs.append(has_sync)
             
-            # Calculate probability as average across all pairs
             if frame_syncs:
                 probability = np.mean(frame_syncs)
                 prob_by_frame.append(probability)
@@ -184,9 +148,7 @@ def calculate_timeline_probabilities(conditions_data):
     return timeline_probs
 
 def create_timeline_graph(timeline_probs, output_dir):
-    """
-    Create timeline graph showing synchronization probability over time.
-    """
+    """Create timeline graph showing synchronization probability over time."""
     plt.figure(figsize=(14, 8))
     
     colors = {'solo': '#FF6B6B', 'cooperation': '#4ECDC4', 'competition': '#45B7D1'}
@@ -199,7 +161,6 @@ def create_timeline_graph(timeline_probs, output_dir):
         plt.plot(frames, probs, label=condition.title(), linewidth=2, 
                 color=color, alpha=0.8)
         
-        # Add smoothed trend line
         if len(probs) > 10:
             from scipy import ndimage
             smoothed = ndimage.gaussian_filter1d(probs, sigma=2)
@@ -212,7 +173,6 @@ def create_timeline_graph(timeline_probs, output_dir):
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=12)
     
-    # Add horizontal reference lines
     plt.axhline(y=0.5, color='gray', linestyle=':', alpha=0.5, label='50% probability')
     
     plt.tight_layout()
@@ -224,16 +184,13 @@ def create_timeline_graph(timeline_probs, output_dir):
     return timeline_path
 
 def create_aoi_breakdown(conditions_data, output_dir):
-    """
-    Create individual AOI synchronization analysis for each condition.
-    """
+    """Create individual AOI synchronization analysis for each condition."""
     aoi_results = {}
     
     for condition, pairs_data in conditions_data.items():
         if not pairs_data:
             continue
             
-        # Find all AOI columns
         sample_df = next(iter(pairs_data.values()))
         aoi_cols = [col for col in sample_df.columns if col.endswith('_sync')]
         
@@ -244,7 +201,7 @@ def create_aoi_breakdown(conditions_data, output_dir):
             
             for pair, sync_df in pairs_data.items():
                 if aoi in sync_df.columns:
-                    sync_rate = sync_df[aoi].mean()  # Percentage of frames with sync for this AOI
+                    sync_rate = sync_df[aoi].mean()
                     pair_percentages.append(sync_rate * 100)
             
             aoi_stats[aoi_name] = {
@@ -273,7 +230,6 @@ def create_aoi_breakdown(conditions_data, output_dir):
             bars = ax.bar(conditions, avg_percentages, yerr=std_percentages, capsize=5,
                          color=['#FF6B6B', '#4ECDC4', '#45B7D1'], alpha=0.8)
             
-            # Add value labels
             for bar, avg in zip(bars, avg_percentages):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width()/2., height + 1,
@@ -295,10 +251,7 @@ def create_aoi_breakdown(conditions_data, output_dir):
     return None, aoi_results
 
 def save_statistical_data(stats, timeline_probs, aoi_results, output_dir):
-    """
-    Save statistical data for further analysis.
-    """
-    # Combine all statistical data
+    """Save statistical data for further analysis."""
     statistical_output = {
         'condition_statistics': stats,
         'timeline_probabilities': timeline_probs,
@@ -310,12 +263,10 @@ def save_statistical_data(stats, timeline_probs, aoi_results, output_dir):
         }
     }
     
-    # Save as JSON
     json_path = os.path.join(output_dir, 'statistical_analysis.json')
     with open(json_path, 'w') as f:
         json.dump(statistical_output, f, indent=2)
     
-    # Save as CSV for easy analysis
     csv_data = []
     for condition, stat in stats.items():
         for i, pair_pct in enumerate(stat['pair_percentages']):
@@ -323,7 +274,7 @@ def save_statistical_data(stats, timeline_probs, aoi_results, output_dir):
                 'condition': condition,
                 'pair': stat['pairs'][i],
                 'sync_percentage': pair_pct,
-                'total_frames': stat['total_frames'] // stat['num_pairs']  # Approximate
+                'total_frames': stat['total_frames'] // stat['num_pairs']
             })
     
     csv_df = pd.DataFrame(csv_data)
@@ -354,7 +305,8 @@ def main():
     print("=== Multi-Condition Gaze Synchronization Analysis ===\n")
     
     # Create output directory
-    output_dir = os.path.join(results_dir, "multi_condition_analysis")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, "../data/processed/figures")
     os.makedirs(output_dir, exist_ok=True)
     
     # Load data

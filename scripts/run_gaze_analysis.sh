@@ -16,10 +16,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Directories (set by start_analysis.sh)
-INPUT_DIR="${INPUT_DIR:-./input}"       # Videos folder path
-OUTPUT_DIR="${OUTPUT_DIR:-./output}"    # Results folder path  
-WORK_DIR="${WORK_DIR:-./workspace}" # Temporary processing
+# Directories (updated for new structure)
+INPUT_DIR="${INPUT_DIR:-../data/raw}"           # Videos folder path
+OUTPUT_DIR="${OUTPUT_DIR:-../data/processed}"   # Results folder path  
+WORK_DIR="${WORK_DIR:-./workspace}"             # Temporary processing
 
 print_banner() {
     echo -e "${BLUE}"
@@ -73,13 +73,13 @@ check_prerequisites() {
     
     # Check if required scripts exist
     SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-    if [ ! -f "$SCRIPT_DIR/analyze_player_gaze.py" ]; then
-        log_error "Gaze tracking script not found. Looking for $SCRIPT_DIR/analyze_player_gaze.py"
+    if [ ! -f "$SCRIPT_DIR/../src/analyze_player_gaze.py" ]; then
+        log_error "Gaze tracking script not found. Looking for $SCRIPT_DIR/../src/analyze_player_gaze.py"
         exit 1
     fi
     
-    if [ ! -f "$SCRIPT_DIR/sync_players_data.py" ]; then
-        log_error "Sync script not found. Looking for $SCRIPT_DIR/sync_players_data.py"
+    if [ ! -f "$SCRIPT_DIR/../src/sync_players_gaze.py" ]; then
+        log_error "Sync script not found. Looking for $SCRIPT_DIR/../src/sync_players_gaze.py"
         exit 1
     fi
     
@@ -135,7 +135,7 @@ run_gaze_tracking() {
     export VIDEO_DIR="$WORK_DIR/player${player}/video_parts"
     export OUTPUT_DIR="$WORK_DIR/player${player}/output"
     SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-    export SCRIBBLE_STATIC_DIR="$SCRIPT_DIR/../static"
+    export SCRIBBLE_STATIC_DIR="$SCRIPT_DIR/../app/static"
     
     echo -e "${YELLOW}"
     echo "=========================================="
@@ -154,7 +154,7 @@ run_gaze_tracking() {
     
     # Start the tracking script
     log_info "Running gaze analysis script..."
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR/../src"
     python analyze_player_gaze.py
     
     # Check that gaze tracking completed successfully
@@ -197,7 +197,7 @@ run_synchronization_analysis() {
     cd "$WORK_DIR"
     log_info "Running synchronization analysis..."
     SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-    python "$SCRIPT_DIR/sync_players_data.py" player1_gaze.csv player2_gaze.csv
+    python "$SCRIPT_DIR/../src/sync_players_gaze.py" player1_gaze.csv player2_gaze.csv
     
     # Move results to output directory
     if [ -d "sync_results" ]; then

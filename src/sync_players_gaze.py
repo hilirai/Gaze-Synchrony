@@ -1,32 +1,32 @@
+"""Gaze synchronization analysis between two players.
+
+Analyzes gaze synchronization by comparing frame-by-frame gaze hits
+between participants and generates visualizations.
+"""
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
+matplotlib.use('Agg')
 import numpy as np
 import os
 
 def analyze_gaze_sync(player1_file, player2_file):
-    """
-    Analyze gaze synchronization between two players.
+    """Analyze gaze synchronization between two players.
     
     Args:
         player1_file: CSV file for player 1 gaze data
         player2_file: CSV file for player 2 gaze data
         
     Returns:
-        sync_results: List of synchronization data per frame
-        obj_cols: List of object column names
-        sync_df: DataFrame with sync analysis for saving
+        tuple: (sync_results, obj_cols, sync_df)
     """
     # Load the data
     p1_data = pd.read_csv(player1_file)
     p2_data = pd.read_csv(player2_file)
     
-    # Check for and apply frame offsets
     p1_offset = 0
     p2_offset = 0
-    
-    # Try to find frame offset files relative to the CSV files
     p1_dir = os.path.dirname(player1_file)
     p2_dir = os.path.dirname(player2_file)
     
@@ -43,7 +43,6 @@ def analyze_gaze_sync(player1_file, player2_file):
             p2_offset = int(f.read().strip())
         print(f"[info] Player 2 frame offset: {p2_offset}")
     
-    # Apply frame offsets by adjusting frame numbers
     if p1_offset > 0:
         p1_data = p1_data.copy()
         p1_data['frame'] = p1_data['frame'] + p1_offset
@@ -56,15 +55,9 @@ def analyze_gaze_sync(player1_file, player2_file):
     print(f"[info] P1 frame range: {p1_data['frame'].min()}-{p1_data['frame'].max()}")
     print(f"[info] P2 frame range: {p2_data['frame'].min()}-{p2_data['frame'].max()}")
     
-    # Get object columns (excluding frame column)
     obj_cols = [col for col in p1_data.columns if col.startswith('obj_')]
-    
-    # Calculate synchronization for each frame
     sync_results = []
-    
-    # Get common frames between both players
-    common_frames = set(p1_data['frame']) & set(p2_data['frame'])
-    common_frames = sorted(list(common_frames))
+    common_frames = sorted(set(p1_data['frame']) & set(p2_data['frame']))
     
     print(f"[info] Found {len(common_frames)} common frames between players")
     
@@ -72,14 +65,11 @@ def analyze_gaze_sync(player1_file, player2_file):
         p1_rows = p1_data[p1_data['frame'] == frame]
         p2_rows = p2_data[p2_data['frame'] == frame]
         
-        # Skip if frame doesn't exist in either dataset
         if p1_rows.empty or p2_rows.empty:
             continue
             
         p1_row = p1_rows.iloc[0]
         p2_row = p2_rows.iloc[0]
-        
-        # Check if both players are looking at the same objects
         same_objects = []
         object_sync_status = {}
         
@@ -109,7 +99,6 @@ def analyze_gaze_sync(player1_file, player2_file):
             'p1_looking_at': ','.join(result['p1_looking_at']),
             'p2_looking_at': ','.join(result['p2_looking_at'])
         }
-        # Add individual object sync status
         for obj_col in obj_cols:
             row_data[f'{obj_col}_sync'] = result['object_sync_status'][obj_col]
         sync_df_data.append(row_data)
@@ -119,14 +108,14 @@ def analyze_gaze_sync(player1_file, player2_file):
     return sync_results, obj_cols, sync_df
 
 def plot_synchronization(sync_results, obj_cols):
-    """Create separate graphs for overall sync and individual object synchronization."""
+    """Create synchronization visualizations."""
     import os
     
     frames = [result['frame'] for result in sync_results]
     sync_counts = [result['sync_count'] for result in sync_results]
     
-    # Create results directory
-    results_dir = 'sync_results'
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    results_dir = os.path.join(script_dir, '../data/processed/figures')
     os.makedirs(results_dir, exist_ok=True)
     
     # Plot 1: Overall synchronization summary
@@ -135,9 +124,8 @@ def plot_synchronization(sync_results, obj_cols):
     plt.xlabel('Time Point')
     plt.ylabel('Synchronized Objects Count')
     
-    # Calculate overall sync rate for title
     avg_sync = sum(sync_counts) / len(sync_counts)
-    total_possible_syncs = len(frames) * len(obj_cols)  # Use actual object columns
+    total_possible_syncs = len(frames) * len(obj_cols)
     total_actual_syncs = sum(sync_counts)
     overall_sync_rate = (total_actual_syncs / total_possible_syncs) * 100
     
@@ -145,10 +133,9 @@ def plot_synchronization(sync_results, obj_cols):
     plt.grid(True, alpha=0.3)
     plt.xticks(frames[::max(1, len(frames)//10)])
     
-    # Highlight frames with high synchronization
     max_sync = max(sync_counts) if sync_counts else 0
     if max_sync > 0:
-        for i, (frame, count) in enumerate(zip(frames, sync_counts)):
+        for frame, count in zip(frames, sync_counts):
             if count == max_sync:
                 plt.annotate(f'Peak: {count}', 
                             xy=(frame, count), 
@@ -171,11 +158,8 @@ def plot_synchronization(sync_results, obj_cols):
     for i, obj_col in enumerate(obj_cols):
         plt.figure(figsize=(12, 6))
         
-        # Extract synchronization status for this object across all frames
         obj_sync = [result['object_sync_status'][obj_col] for result in sync_results]
         obj_sync_binary = [1 if sync else 0 for sync in obj_sync]
-        
-        # Plot as step function for binary data
         plt.step(frames, obj_sync_binary, where='mid', linewidth=3, 
                 color=colors[i % len(colors)], marker='o', markersize=4, label='Synchronized')
         plt.fill_between(frames, obj_sync_binary, step='mid', alpha=0.3, 
@@ -184,7 +168,6 @@ def plot_synchronization(sync_results, obj_cols):
         plt.xlabel('Time Point')
         plt.ylabel('Players Looking at Same Object')
         
-        # Calculate sync rate for title
         sync_rate = sum(obj_sync_binary) / len(obj_sync_binary) * 100
         plt.title(f'{obj_col.replace("_", " ").title()} - Joint Attention Analysis\nBoth Players Looking: {sync_rate:.1f}% of time')
         
@@ -193,11 +176,8 @@ def plot_synchronization(sync_results, obj_cols):
         plt.grid(True, alpha=0.3)
         plt.xticks(frames[::max(1, len(frames)//10)])
         
-        # Add detailed statistics
         sync_moments_count = sum(obj_sync_binary)
         total_moments = len(obj_sync_binary)
-        
-        # Find longest sync periods
         sync_periods = []
         current_period = 0
         for sync in obj_sync_binary:
@@ -277,7 +257,9 @@ if __name__ == "__main__":
         sync_results, obj_cols, sync_df = analyze_gaze_sync(player1_file, player2_file)
         
         # Save sync analysis as CSV
-        sync_csv_path = os.path.join(os.path.dirname(player1_file), "sync_analysis.csv")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sync_csv_path = os.path.join(script_dir, "../data/processed/sync_csv", "sync_analysis.csv")
+        os.makedirs(os.path.dirname(sync_csv_path), exist_ok=True)
         sync_df.to_csv(sync_csv_path, index=False)
         print(f"[OK] Saved synchronization analysis to: {sync_csv_path}")
         

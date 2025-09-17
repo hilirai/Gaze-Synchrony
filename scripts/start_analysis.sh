@@ -82,7 +82,7 @@ echo ""
 
 # Get the script directory to find run_gaze_analysis.sh
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-RUN_GAZE_SCRIPT="$SCRIPT_DIR/scripts/run_gaze_analysis.sh"
+RUN_GAZE_SCRIPT="$SCRIPT_DIR/run_gaze_analysis.sh"
 
 # Check if run_gaze_analysis.sh exists
 if [ ! -f "$RUN_GAZE_SCRIPT" ]; then
@@ -94,6 +94,7 @@ fi
 export INPUT_DIR="$VIDEOS_DIR"
 export OUTPUT_DIR="$RESULTS_DIR"
 export WORK_DIR="$PROJECT_DIR/workspace"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo -e "${BLUE}Running gaze analysis script...${NC}"
 echo "DEBUG: INPUT_DIR=$INPUT_DIR"

@@ -1,0 +1,34 @@
+# Core dependencies for Gaze Synchronization Analysis Pipeline
+
+# Deep Learning & Computer Vision
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# SAM2 Model (install from source)
+# git+https://github.com/facebookresearch/segment-anything-2.git
+
+# Data Processing & Analysis
+pandas>=2.0.0
+matplotlib>=3.7.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+tqdm>=4.65.0
+
+# Web Interface
+Flask>=2.3.0
+Jinja2>=3.1.0
+
+# File I/O & Utilities
+PyYAML>=6.0
+requests>=2.31.0
+python-dateutil>=2.8.0
+
+# Optional: Jupyter for analysis notebooks
+# jupyter>=1.0.0
+# ipython>=8.0.0
+
+# System utilities
+psutil>=5.9.0

@@ -1,0 +1,77 @@
+# Gaze Synchronization Analysis Pipeline Configuration
+
+# SAM2 Model Configuration
+model:
+  checkpoint: "/home/administrator/sam2/sam2/checkpoints/sam2.1_hiera_tiny.pt"
+  config: "/configs/sam2.1/sam2.1_hiera_t.yaml"
+  device: "cuda"  # "cuda" or "cpu"
+  memory_fraction: 0.9  # GPU memory usage (0.1-1.0)
+
+# Video Processing
+video:
+  segment_duration: 15  # seconds per video segment
+  max_frame_extraction: 50  # frames to extract for selection
+  grid_spacing: 50  # pixel spacing for coordinate grid
+
+# Gaze Detection
+gaze:
+  radius: 100  # pixels - gaze detection radius
+  hsv_ranges:
+    # HSV color ranges for red dot detection
+    lower1: [0, 70, 50]    # Lower bound 1
+    upper1: [10, 255, 255] # Upper bound 1  
+    lower2: [170, 70, 50]  # Lower bound 2
+    upper2: [180, 255, 255] # Upper bound 2
+  morphology_kernel: [5, 5]  # morphological operations kernel
+
+# Object Tracking
+tracking:
+  max_overlays_save: 10  # max overlay images to save per part
+  memory_cleanup_interval: 50  # frames between GPU memory cleanup
+  
+  # Stroke sampling parameters
+  sampling:
+    positive_step: 8    # take every Nth vertex of positive stroke
+    positive_cap: 12    # max positive points per stroke
+    negative_step: 8    # take every Nth vertex of negative stroke  
+    negative_cap: 2     # max negative points total
+    strategy: "uniform" # "uniform" or "stride"
+    min_separation: 6.0 # minimum pixel separation between points
+
+# Synchronization Analysis
+synchronization:
+  time_window: 1  # frames - synchrony detection window (1 = 33ms)
+  
+# Data Paths (can be overridden by environment variables)
+paths:
+  video_dir: "data/raw"
+  output_dir: "data/processed/gaze_csv"
+  sync_output_dir: "data/processed/sync_csv"
+  figures_dir: "data/processed/figures"
+  static_dir: "app/static"
+
+# AOI (Areas of Interest) Definitions
+aoi:
+  labels:
+    - "hand_self"     # participant wearing glasses - their hands
+    - "hand_partner"  # other participant's hands
+    - "die"          # game die
+    - "tower"        # central tower/base/support structure  
+    - "game_pieces"  # movable game elements/parts
+
+# Processing Options
+processing:
+  single_process: false  # set to true to disable multiprocessing
+  max_workers: null      # null = auto-detect CPU count
+  print_frame_gaze: false # enable detailed frame-by-frame logging
+
+# Flask Web Interface
+web:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "[%(levelname)s] %(message)s"
