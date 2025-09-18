@@ -238,10 +238,9 @@ def main():
         draw_numbered_grid(frame)
         grid_filename = f"seed_grid_frame_{frame_idx}.jpg"
         grid_path = os.path.join(OUTPUT_DIR, grid_filename)
-        grid_path = "/home/administrator/sam2/Gaze-Synchrony/app/static"
-        print("grid pathL********", grid_path)
-        cv2.imwrite(os.path.join("/home/administrator/sam2/Gaze-Synchrony/app/static", grid_filename), frame)
-        
+        cv2.imwrite(grid_path, frame)
+
+        # Copy to Flask static directory for web interface
         static_grid = os.path.join(SCRIBBLE_STATIC_DIR, grid_filename)
         cv2.imwrite(static_grid, frame)
         
@@ -252,7 +251,7 @@ def main():
     
     # Save default grid for backwards compatibility
     if frames_extracted > 0:
-        default_grid_path = os.path.join(grid_path, "seed_grid.jpg")
+        default_grid_path = os.path.join(OUTPUT_DIR, "seed_grid.jpg")
         default_static_grid = os.path.join(SCRIBBLE_STATIC_DIR, "seed_grid.jpg")
         shutil.copy(os.path.join(OUTPUT_DIR, "seed_grid_frame_0.jpg"), default_grid_path)
         shutil.copy(os.path.join(SCRIBBLE_STATIC_DIR, "seed_grid_frame_0.jpg"), default_static_grid)
